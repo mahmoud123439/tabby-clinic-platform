@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS doctors (
 CREATE TABLE IF NOT EXISTS branch_staff (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
  branch_id TEXT NOT NULL REFERENCES branches(id), department TEXT NOT NULL,
- name_cipher BLOB, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+ name_cipher BLOB, employee_number TEXT UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS doctor_hours (
  id TEXT PRIMARY KEY, doctor_id TEXT NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
@@ -97,7 +97,7 @@ CREATE INDEX IF NOT EXISTS service_requests_patient ON service_requests(patient_
 CREATE INDEX IF NOT EXISTS service_requests_status ON service_requests(status,created_at);
 CREATE INDEX IF NOT EXISTS branch_staff_lookup ON branch_staff(branch_id,department,active);
 CREATE UNIQUE INDEX IF NOT EXISTS branch_one_manager ON branch_staff(branch_id) WHERE department='manager' AND active=1;
-CREATE UNIQUE INDEX IF NOT EXISTS branch_staff_department ON branch_staff(branch_id,department) WHERE department<>'manager' AND active=1;
+CREATE UNIQUE INDEX IF NOT EXISTS branch_staff_department ON branch_staff(branch_id,department) WHERE department NOT IN ('manager','nursing') AND active=1;
 CREATE UNIQUE INDEX IF NOT EXISTS appointments_one_booked_slot ON appointments(doctor_id,starts_at) WHERE status='booked';`);
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name);
 if (!userColumns.includes('role')) db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'patient'");
@@ -116,6 +116,8 @@ if(!doctorColumns.includes('verification_reference'))db.exec("ALTER TABLE doctor
 if(!doctorColumns.includes('account_user_id'))db.exec('ALTER TABLE doctors ADD COLUMN account_user_id TEXT REFERENCES users(id)');
 const branchStaffColumns=db.prepare('PRAGMA table_info(branch_staff)').all().map(column=>column.name);
 if(!branchStaffColumns.includes('name_cipher'))db.exec('ALTER TABLE branch_staff ADD COLUMN name_cipher BLOB');
+if(!branchStaffColumns.includes('employee_number'))db.exec('ALTER TABLE branch_staff ADD COLUMN employee_number TEXT');
+db.exec("DROP INDEX IF EXISTS branch_staff_department; CREATE UNIQUE INDEX branch_staff_department ON branch_staff(branch_id,department) WHERE department NOT IN ('manager','nursing') AND active=1; CREATE UNIQUE INDEX IF NOT EXISTS branch_staff_employee_number ON branch_staff(employee_number) WHERE employee_number IS NOT NULL;");
 const serviceRequestColumns=db.prepare('PRAGMA table_info(service_requests)').all().map(column=>column.name);
 if(!serviceRequestColumns.includes('branch_id'))db.exec('ALTER TABLE service_requests ADD COLUMN branch_id TEXT REFERENCES branches(id)');
 const plannedBranches=[
@@ -131,10 +133,11 @@ db.prepare('INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1
 
 const pbkdf2 = promisify(crypto.pbkdf2);
 const dummyPasswordSalt=crypto.randomBytes(16),dummyPasswordHash=crypto.randomBytes(32);
-const STAFF_DEPARTMENTS=['reception','appointments','follow_up','laboratory','radiology','pharmacy','billing','medical_records','operations'];
+const STAFF_DEPARTMENTS=['reception','appointments','follow_up','laboratory','radiology','pharmacy','billing','medical_records','operations','nursing'];
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 function newMedicalRecordNumber(){let next=db.prepare("SELECT COALESCE(MAX(CAST(substr(medical_record_number,5) AS INTEGER)),0)+1 AS n FROM patient_profiles WHERE medical_record_number LIKE 'TBY-%'").get().n;while(db.prepare('SELECT 1 FROM patient_profiles WHERE medical_record_number=?').get(`TBY-${String(next).padStart(8,'0')}`))next++;return `TBY-${String(next).padStart(8,'0')}`;}
+function newNurseFileNumber(){let next=db.prepare("SELECT COALESCE(MAX(CAST(substr(employee_number,5) AS INTEGER)),0)+1 AS n FROM branch_staff WHERE employee_number LIKE 'NUR-%'").get().n;while(db.prepare('SELECT 1 FROM branch_staff WHERE employee_number=?').get(`NUR-${String(next).padStart(6,'0')}`))next++;return `NUR-${String(next).padStart(6,'0')}`;}
 function encrypt(value) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', DATA_KEY, iv);
@@ -274,11 +277,11 @@ async function createBranchAccount({branchId,department,name,email,phone=''}){
   if(!db.prepare('SELECT 1 FROM branches WHERE id=?').get(branchId))throw Object.assign(new Error('الفرع غير موجود.'),{status:404});
   if(!['manager',...STAFF_DEPARTMENTS].includes(department))throw Object.assign(new Error('الدور الوظيفي غير صالح.'),{status:400});
   if(db.prepare('SELECT 1 FROM users WHERE email_lookup=?').get(emailLookup(email)))throw Object.assign(new Error('البريد مسجل بالفعل.'),{status:409});
-  if(department!=='manager'&&db.prepare('SELECT 1 FROM branch_staff WHERE branch_id=? AND department=? AND active=1').get(branchId,department))throw Object.assign(new Error('يوجد مستخدم نشط لهذا الدور في الفرع بالفعل.'),{status:409});
+  if(department!=='manager'&&department!=='nursing'&&db.prepare('SELECT 1 FROM branch_staff WHERE branch_id=? AND department=? AND active=1').get(branchId,department))throw Object.assign(new Error('يوجد مستخدم نشط لهذا الدور في الفرع بالفعل.'),{status:409});
   if(department==='manager'&&db.prepare("SELECT 1 FROM branch_staff WHERE branch_id=? AND department='manager' AND active=1").get(branchId))throw Object.assign(new Error('يوجد مدير نشط لهذا الفرع بالفعل.'),{status:409});
-  const userId=uuid(),membershipId=uuid(),password=crypto.randomBytes(24).toString('base64url'),salt=crypto.randomBytes(16),hash=await pbkdf2(password,salt,310000,32,'sha256'),role=department==='manager'?'branch_manager':'branch_staff';
-  db.exec('BEGIN IMMEDIATE');try{db.prepare('INSERT INTO users(id,email_lookup,email_cipher,phone_cipher,password_salt,password_hash,password_change_required,role,created_at) VALUES(?,?,?,?,?,?,1,?,?)').run(userId,emailLookup(email),encrypt({email}),encrypt({phone}),salt,hash,role,nowIso());db.prepare('INSERT INTO branch_staff(id,user_id,branch_id,department,name_cipher,created_at) VALUES(?,?,?,?,?,?)').run(membershipId,userId,branchId,department,encrypt({name}),nowIso());db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');if(String(error.message).includes('UNIQUE'))throw Object.assign(new Error('الحساب أو الدور موجود بالفعل.'),{status:409});throw error;}
-  return {userId,membershipId,name,email,phone,department,role,temporaryPassword:password};
+  const userId=uuid(),membershipId=uuid(),employeeNumber=department==='nursing'?newNurseFileNumber():null,password=crypto.randomBytes(24).toString('base64url'),salt=crypto.randomBytes(16),hash=await pbkdf2(password,salt,310000,32,'sha256'),role=department==='manager'?'branch_manager':'branch_staff';
+  db.exec('BEGIN IMMEDIATE');try{db.prepare('INSERT INTO users(id,email_lookup,email_cipher,phone_cipher,password_salt,password_hash,password_change_required,role,created_at) VALUES(?,?,?,?,?,?,1,?,?)').run(userId,emailLookup(email),encrypt({email}),encrypt({phone}),salt,hash,role,nowIso());db.prepare('INSERT INTO branch_staff(id,user_id,branch_id,department,name_cipher,employee_number,created_at) VALUES(?,?,?,?,?,?,?)').run(membershipId,userId,branchId,department,encrypt({name}),employeeNumber,nowIso());db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');if(String(error.message).includes('UNIQUE'))throw Object.assign(new Error('الحساب أو الدور موجود بالفعل.'),{status:409});throw error;}
+  return {userId,membershipId,name,email,phone,department,role,employeeNumber,temporaryPassword:password};
 }
 function validDate(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
@@ -435,7 +438,7 @@ const server = http.createServer(async (req, res) => {
       }
       if(req.method==='GET'&&url.pathname==='/api/branch/staff'){
         if(member.department!=='manager'&&member.department!=='operations')return json(res,403,{error:'قائمة موظفي الفرع للمدير أو مسؤول التشغيل.'});
-        const staff=db.prepare('SELECT s.user_id AS userId,s.department,s.name_cipher,s.active,s.created_at AS createdAt,u.email_cipher,u.phone_cipher FROM branch_staff s JOIN users u ON u.id=s.user_id WHERE s.branch_id=? ORDER BY s.department').all(member.branchId).map(s=>({userId:s.userId,name:s.name_cipher?decrypt(s.name_cipher).name:'',department:s.department,active:Boolean(s.active),createdAt:s.createdAt,email:decrypt(s.email_cipher).email,phone:decrypt(s.phone_cipher).phone}));return json(res,200,{staff});
+        const staff=db.prepare('SELECT s.user_id AS userId,s.department,s.name_cipher,s.employee_number AS employeeNumber,s.active,s.created_at AS createdAt,u.email_cipher,u.phone_cipher FROM branch_staff s JOIN users u ON u.id=s.user_id WHERE s.branch_id=? ORDER BY s.department').all(member.branchId).map(s=>({userId:s.userId,name:s.name_cipher?decrypt(s.name_cipher).name:'',department:s.department,employeeNumber:s.employeeNumber||'',active:Boolean(s.active),createdAt:s.createdAt,email:decrypt(s.email_cipher).email,phone:decrypt(s.phone_cipher).phone}));return json(res,200,{staff});
       }
       if(req.method==='POST'&&url.pathname==='/api/branch/staff')return json(res,403,{error:'إنشاء حسابات الموظفين والمديرين متاح لمسؤول المنصة فقط.'});
       if(req.method==='GET'&&url.pathname==='/api/branch/appointments'){
@@ -454,7 +457,7 @@ const server = http.createServer(async (req, res) => {
     }
     if(url.pathname.startsWith('/api/admin/')){
       const admin=requireAdmin(req,res);if(!admin)return;
-      if(req.method==='GET'&&url.pathname==='/api/admin/staff')return json(res,200,{staff:db.prepare('SELECT s.user_id AS userId,s.branch_id AS branchId,s.department,s.name_cipher,s.active,s.created_at AS createdAt,b.name AS branch,u.email_cipher,u.phone_cipher FROM branch_staff s JOIN branches b ON b.id=s.branch_id JOIN users u ON u.id=s.user_id ORDER BY b.name,s.department').all().map(s=>({userId:s.userId,branchId:s.branchId,branch:s.branch,name:s.name_cipher?decrypt(s.name_cipher).name:'',department:s.department,active:Boolean(s.active),createdAt:s.createdAt,email:decrypt(s.email_cipher).email,phone:decrypt(s.phone_cipher).phone}))});
+      if(req.method==='GET'&&url.pathname==='/api/admin/staff')return json(res,200,{staff:db.prepare('SELECT s.user_id AS userId,s.branch_id AS branchId,s.department,s.name_cipher,s.employee_number AS employeeNumber,s.active,s.created_at AS createdAt,b.name AS branch,u.email_cipher,u.phone_cipher FROM branch_staff s JOIN branches b ON b.id=s.branch_id JOIN users u ON u.id=s.user_id ORDER BY b.name,s.department').all().map(s=>({userId:s.userId,branchId:s.branchId,branch:s.branch,name:s.name_cipher?decrypt(s.name_cipher).name:'',department:s.department,employeeNumber:s.employeeNumber||'',active:Boolean(s.active),createdAt:s.createdAt,email:decrypt(s.email_cipher).email,phone:decrypt(s.phone_cipher).phone}))});
       if(req.method==='POST'&&url.pathname==='/api/admin/staff'){const b=await readJson(req),account=await createBranchAccount({branchId:String(b.branchId||''),department:String(b.department||''),name:b.name,email:b.email,phone:b.phone});audit(admin.id,'branch_account_created',account.userId);return json(res,201,{ok:true,account});}
       const deactivateStaff=url.pathname.match(/^\/api\/admin\/staff\/([0-9a-f-]+)\/deactivate$/i);
       if(req.method==='POST'&&deactivateStaff){const result=db.prepare('UPDATE branch_staff SET active=0 WHERE user_id=? AND active=1').run(deactivateStaff[1]);if(!result.changes)return json(res,404,{error:'حساب الموظف غير موجود أو موقوف.'});db.prepare("UPDATE users SET role='disabled' WHERE id=?").run(deactivateStaff[1]);db.prepare('DELETE FROM sessions WHERE user_id=?').run(deactivateStaff[1]);audit(admin.id,'branch_account_deactivated',deactivateStaff[1]);return json(res,200,{ok:true});}
@@ -511,12 +514,12 @@ const server = http.createServer(async (req, res) => {
       audit(userId, 'account_created'); setSession(res, userId); return json(res, 201, { ok: true, patientId,medicalRecordNumber });
     }
     if (req.method === 'POST' && url.pathname === '/api/login') {
-      const body = await readJson(req); const email = String(body.email || '').trim().toLowerCase();
+      const body = await readJson(req); const identifier=String(body.identifier||body.email||'').trim(),email=identifier.toLowerCase(),nurseNumber=identifier.toUpperCase();
       const attemptKey = crypto.createHash('sha256').update(`${req.socket.remoteAddress || ''}:${email}`).digest('hex');
       if (authLocked(attemptKey)) return json(res, 429, { error: 'محاولات كثيرة. انتظر ١٠ دقائق ثم حاول مرة أخرى.' });
-      const row = db.prepare('SELECT * FROM users WHERE email_lookup=?').get(emailLookup(email));
+      const row = db.prepare("SELECT u.* FROM users u LEFT JOIN branch_staff s ON s.user_id=u.id AND s.active=1 WHERE u.email_lookup=? OR (s.employee_number=? AND s.department='nursing') LIMIT 1").get(emailLookup(email),nurseNumber);
       const hash = await pbkdf2(String(body.password || ''), row?.password_salt||dummyPasswordSalt, 310000, 32, 'sha256');
-      if (!row||!crypto.timingSafeEqual(hash, row?.password_hash||dummyPasswordHash)) { authFailed(attemptKey); return json(res, 401, { error: 'البريد أو كلمة المرور غير صحيحة.' }); }
+      if (!row||!crypto.timingSafeEqual(hash, row?.password_hash||dummyPasswordHash)) { authFailed(attemptKey); return json(res, 401, { error: 'رقم الملف أو البريد الإلكتروني أو كلمة المرور غير صحيحة.' }); }
       authSucceeded(attemptKey);
       setSession(res, row.id); audit(row.id, 'login'); return json(res, 200, { ok: true });
     }

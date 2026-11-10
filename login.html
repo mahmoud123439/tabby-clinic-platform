@@ -39,14 +39,14 @@
       <h2 id="formTitle">تسجيل الدخول</h2>
       <p class="hint" id="formHint">أدخل بيانات حسابك للوصول إلى خدماتك الصحية.</p>
       <form id="loginForm">
-        <div class="field"><label for="email">البريد الإلكتروني</label><input id="email" name="email" type="email" autocomplete="username" placeholder="name@example.com" required></div>
+        <div class="field"><label for="identifier">البريد الإلكتروني أو رقم الملف الوظيفي</label><input id="identifier" name="identifier" type="text" autocomplete="username" placeholder="البريد أو NUR-000001" required></div>
         <div class="field"><label for="password">كلمة المرور</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="أدخل كلمة المرور" required></div>
         <p class="error" id="authError" role="alert"></p>
         <button class="btn" type="submit">دخول إلى حسابي</button>
       </form>
       <p id="registerLink" class="links">ليس لديك حساب؟ <a href="/register">إنشاء حساب مريض</a></p>
       <p id="loginLink" class="links hidden">لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a></p>
-      <div class="notice" id="roleNotice"><span class="notice-icon">i</span><span>إذا كنت طبيبًا أو موظفًا، استخدم البريد وكلمة المرور المؤقتة اللذين سلّمهما لك مسؤول المنصة.</span></div>
+      <div class="notice" id="roleNotice"><span class="notice-icon">i</span><span>للممرض استخدم رقم الملف الوظيفي وكلمة المرور التي سلّمها لك مسؤول الفرع. باقي الموظفين يستخدمون البريد وكلمة المرور المؤقتة.</span></div>
       <a class="back" href="/">← العودة للصفحة الرئيسية</a>
     </section>
   </main>

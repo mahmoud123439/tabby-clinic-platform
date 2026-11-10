@@ -1,0 +1,8 @@
+{
+  "name": "tabby-clinic-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Arabic multi-branch clinic and patient record application",
+  "scripts": { "start": "node server.js", "test": "node --test" },
+  "engines": { "node": ">=24.0.0" }
+}

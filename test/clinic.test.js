@@ -25,7 +25,7 @@ async function rawRequest(method,url,raw,contentType,cookie='') {
   await handler(req,response);return {status:response.status,headers,raw:response.data};
 }
 
-let patientCookie, adminCookie, branchId, doctorId, patientId;
+let patientCookie, adminCookie, doctorCookie, branchId, doctorId, patientId;
 before(async () => {
   const salt = crypto.randomBytes(16), password = 'AdminStrongPass!2026';
   const hash = crypto.pbkdf2Sync(password, salt, 310000, 32, 'sha256');
@@ -67,15 +67,26 @@ test('admin can publish verified branch and doctor, schedule real slots, and boo
   assert.equal((await request('POST','/api/appointments',booking,patientCookie)).status,409);
   const appointments=(await request('GET','/api/appointments',undefined,patientCookie)).body.appointments;
   assert.equal(appointments.length,1); assert.equal(appointments[0].status,'booked');
+  const bookedChart=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(bookedChart.body.records.some(r=>r.category==='appointment'&&r.appointmentId===appointments[0].id));
   const doctorAccount=await request('POST',`/api/admin/doctors/${doctorId}/account`,{email:'doctor@example.test',phone:'01012345678'},adminCookie);
   assert.equal(doctorAccount.status,201);assert.ok(doctorAccount.body.account.temporaryPassword);
   const doctorLogin=await request('POST','/api/login',{email:'doctor@example.test',password:doctorAccount.body.account.temporaryPassword});
-  assert.equal(doctorLogin.status,200);let doctorCookie=doctorLogin.headers['Set-Cookie'].split(';')[0];
+  assert.equal(doctorLogin.status,200);doctorCookie=doctorLogin.headers['Set-Cookie'].split(';')[0];
   assert.equal((await request('GET','/api/doctor/appointments',undefined,doctorCookie)).status,428);
   const doctorPassword=await request('POST','/api/password/change',{currentPassword:doctorAccount.body.account.temporaryPassword,newPassword:'DoctorNewStrongPass!2026'},doctorCookie);assert.equal(doctorPassword.status,200);doctorCookie=doctorPassword.headers['Set-Cookie'].split(';')[0];
   assert.equal((await request('GET','/api/doctor/me',undefined,doctorCookie)).body.doctors[0].id,doctorId);
   assert.equal((await request('GET','/api/doctor/appointments',undefined,doctorCookie)).body.appointments.length,1);
   assert.equal((await request('GET','/api/medical-record',undefined,doctorCookie)).status,403);
+  const appointment=(await request('GET','/api/doctor/appointments',undefined,doctorCookie)).body.appointments[0];
+  const chart=await request('GET',`/api/doctor/appointments/${appointment.id}/records`,undefined,doctorCookie);assert.equal(chart.status,200);assert.equal(chart.body.patientId,patientId);
+  assert.equal((await request('PATCH',`/api/medical-admin/patients/${chart.body.patientUserId}/profile`,{bloodType:'A+'},doctorCookie)).status,200);
+  db.prepare("UPDATE appointments SET starts_at=?,status='completed' WHERE id=?").run(`${new Date(Date.now()-86400000).toISOString().slice(0,10)}T10:00`,appointment.id);
+  const followDate=new Date(Date.now()+21*86400000).toISOString().slice(0,10);
+  const follow=await request('POST',`/api/doctor/appointments/${appointment.id}/follow-up`,{startsAt:`${followDate}T23:00`},doctorCookie);assert.equal(follow.status,201);
+  const afterFollow=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(afterFollow.body.records.some(r=>r.category==='follow_up'&&r.appointmentId===follow.body.appointment.id));
+  const boundary='doctor-report-boundary',pdf=Buffer.from('%PDF-1.4\nverified report\n%%EOF'),parts=[Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nlab\r\n--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nتحليل موثق\r\n--${boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nملخص التقرير\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="lab.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),pdf,Buffer.from(`\r\n--${boundary}--\r\n`)];
+  const resultUpload=await rawRequest('POST',`/api/medical-admin/patients/${chart.body.patientUserId}/upload`,Buffer.concat(parts),`multipart/form-data; boundary=${boundary}`,doctorCookie);assert.equal(resultUpload.status,201);
+  const report=JSON.parse(resultUpload.raw.toString()).record,withReport=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(withReport.body.records.some(r=>r.id===report.id&&r.title==='تحليل موثق'&&r.fileName==='lab.pdf'));
 });
 
 test('security headers are returned on API responses', async () => {
@@ -85,19 +96,12 @@ test('security headers are returned on API responses', async () => {
   assert.equal(res.headers['X-Content-Type-Options'],'nosniff');
 });
 
-test('uploaded lab report appears in the patient file immediately and stays private', async()=>{
-  const boundary='test-boundary-45',pdf=Buffer.from('%PDF-1.4\nclinic report\n%%EOF');
-  const fields=[['category','lab'],['title','تحليل تجريبي'],['note','نتيجة اختبار']];
-  const parts=[];for(const [name,value] of fields)parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
-  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="report.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),pdf,Buffer.from(`\r\n--${boundary}--\r\n`));
+test('patient medical file is read-only and lab uploads require staff workflow', async()=>{
+  assert.equal((await request('POST','/api/record-entry',{category:'visit',title:'إدخال مريض',detail:'يجب رفضه'},patientCookie)).status,403);
+  const boundary='test-boundary-45',pdf=Buffer.from('%PDF-1.4\nclinic report\n%%EOF'),parts=[];
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nlab\r\n--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nتحليل\r\n--${boundary}--\r\n`));
   const uploaded=await rawRequest('POST','/api/upload',Buffer.concat(parts),`multipart/form-data; boundary=${boundary}`,patientCookie);
-  assert.equal(uploaded.status,201);const report=JSON.parse(uploaded.raw.toString()).record;
-  assert.equal(report.status,'uploaded_pending_clinician_review');
-  const list=await request('GET','/api/medical-record',undefined,patientCookie);
-  assert.ok(list.body.records.some(r=>r.id===report.id&&r.title==='تحليل تجريبي'));
-  const downloaded=await rawRequest('GET',`/api/medical-record/${report.id}/file`,Buffer.alloc(0),'',patientCookie);
-  assert.equal(downloaded.status,200);assert.deepEqual(downloaded.raw,pdf);
-  assert.equal((await rawRequest('GET',`/api/medical-record/${report.id}/file`,Buffer.alloc(0),'',adminCookie)).status,403);
+  assert.equal(uploaded.status,403);
 });
 
 test('all non-clinic services create tracked requests for patients and admins',async()=>{
@@ -130,7 +134,7 @@ test('only the platform admin provisions branch staff; branch roles stay scoped'
   assert.equal((await request('POST','/api/admin/staff',{branchId,department:'reception',name:'موظف مكرر',email:'duplicate@example.test'},adminCookie)).status,409);
   const roster=await request('GET','/api/branch/staff',undefined,managerCookie);assert.equal(roster.body.staff.length,10);assert.equal(roster.body.staff.find(s=>s.department==='manager').name,'مدير فرع تجريبي');
   const dashboard=await request('GET','/api/branch/dashboard',undefined,managerCookie);assert.equal(dashboard.body.branch.id,branchId);assert.equal(dashboard.body.counts.staff,9);
-  assert.equal((await request('GET','/api/branch/appointments',undefined,managerCookie)).body.appointments.length,1);
+  assert.equal((await request('GET','/api/branch/appointments',undefined,managerCookie)).body.appointments.length,2);
   const patientUserId=db.prepare('SELECT user_id FROM patient_profiles WHERE id=?').get(patientId).user_id;
   const scopedList=await request('GET','/api/medical-admin/patients',undefined,managerCookie);assert.equal(scopedList.status,200);assert.ok(scopedList.body.patients.some(p=>p.userId===patientUserId));
   const patientFile=await request('GET',`/api/medical-admin/patients/${patientUserId}`,undefined,managerCookie);assert.equal(patientFile.status,200);assert.equal(patientFile.body.profile.name,'مريض تجريبي');

@@ -131,6 +131,12 @@ test('only the platform admin provisions branch staff; branch roles stay scoped'
   const roster=await request('GET','/api/branch/staff',undefined,managerCookie);assert.equal(roster.body.staff.length,10);assert.equal(roster.body.staff.find(s=>s.department==='manager').name,'مدير فرع تجريبي');
   const dashboard=await request('GET','/api/branch/dashboard',undefined,managerCookie);assert.equal(dashboard.body.branch.id,branchId);assert.equal(dashboard.body.counts.staff,9);
   assert.equal((await request('GET','/api/branch/appointments',undefined,managerCookie)).body.appointments.length,1);
+  const patientUserId=db.prepare('SELECT user_id FROM patient_profiles WHERE id=?').get(patientId).user_id;
+  const scopedList=await request('GET','/api/medical-admin/patients',undefined,managerCookie);assert.equal(scopedList.status,200);assert.ok(scopedList.body.patients.some(p=>p.userId===patientUserId));
+  const patientFile=await request('GET',`/api/medical-admin/patients/${patientUserId}`,undefined,managerCookie);assert.equal(patientFile.status,200);assert.equal(patientFile.body.profile.name,'مريض تجريبي');
+  const staffRecord=await request('POST',`/api/medical-admin/patients/${patientUserId}/records`,{category:'visit',title:'ملاحظة استقبال',detail:'معلومة أضافها موظف الفرع'},managerCookie);assert.equal(staffRecord.status,201);assert.equal(staffRecord.body.record.status,'staff_entered_pending_clinician_review');
+  assert.ok((await request('GET',`/api/medical-admin/patients/${patientUserId}`,undefined,adminCookie)).body.records.some(r=>r.id===staffRecord.body.record.id));
+  const provisioned=await request('POST','/api/medical-admin/patients',{name:'مريض أنشأه الفرع',email:'frontdesk.patient@example.test',phone:'01098765432',healthConsent:true},managerCookie);assert.equal(provisioned.status,201);assert.ok(provisioned.body.account.temporaryPassword);assert.equal((await request('GET',`/api/medical-admin/patients/${provisioned.body.userId}`,undefined,managerCookie)).status,200);
   assert.equal((await request('GET','/api/medical-record',undefined,managerCookie)).status,403);
   const labRequest=await request('POST','/api/service-requests',{serviceType:'lab_booking',serviceName:'تحليل تجريبي',area:'المعادي',branchId},patientCookie);assert.equal(labRequest.status,201);
   assert.equal((await request('GET','/api/branch/service-requests',undefined,managerCookie)).body.requests.length,1);
@@ -138,6 +144,7 @@ test('only the platform admin provisions branch staff; branch roles stay scoped'
   const otherManager=await request('POST','/api/admin/staff',{branchId:otherBranch.body.id,department:'manager',name:'مدير آخر',email:'other.manager@example.test'},adminCookie);assert.equal(otherManager.status,201);
   const otherLogin=await request('POST','/api/login',{email:'other.manager@example.test',password:otherManager.body.account.temporaryPassword});assert.equal(otherLogin.status,200);let otherCookie=otherLogin.headers['Set-Cookie'].split(';')[0];
   const otherPassword=await request('POST','/api/password/change',{currentPassword:otherManager.body.account.temporaryPassword,newPassword:'OtherManagerStrongPass!2026'},otherCookie);assert.equal(otherPassword.status,200);otherCookie=otherPassword.headers['Set-Cookie'].split(';')[0];
+  assert.equal((await request('GET',`/api/medical-admin/patients/${provisioned.body.userId}`,undefined,otherCookie)).status,404);
   assert.equal((await request('GET','/api/branch/appointments',undefined,otherCookie)).body.appointments.length,0);
   assert.equal((await request('GET','/api/branch/service-requests',undefined,otherCookie)).body.requests.length,0);
   const labLogin=await request('POST','/api/login',{email:'branch4@example.test',password:staffPasswords.laboratory});assert.equal(labLogin.status,200);let labCookie=labLogin.headers['Set-Cookie'].split(';')[0];

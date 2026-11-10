@@ -34,7 +34,7 @@ before(async () => {
   const adminLogin = await request('POST','/api/login',{email:'admin@example.test',password});
   adminCookie = adminLogin.headers['Set-Cookie'].split(';')[0];
   const register = await request('POST','/api/register',{name:'مريض تجريبي',email:'patient@example.test',phone:'01012345678',password:'PatientStrongPass!2026',healthConsent:true,role:'admin'});
-  assert.equal(register.status,201); patientId=register.body.patientId;
+  assert.equal(register.status,201); patientId=register.body.patientId;assert.match(register.body.medicalRecordNumber,/^TBY-\d{8}$/);
   patientCookie = register.headers['Set-Cookie'].split(';')[0];
 });
 after(() => { db.close(); });
@@ -67,7 +67,7 @@ test('admin can publish verified branch and doctor, schedule real slots, and boo
   assert.equal((await request('POST','/api/appointments',booking,patientCookie)).status,409);
   const appointments=(await request('GET','/api/appointments',undefined,patientCookie)).body.appointments;
   assert.equal(appointments.length,1); assert.equal(appointments[0].status,'booked');
-  const bookedChart=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(bookedChart.body.records.some(r=>r.category==='appointment'&&r.appointmentId===appointments[0].id));
+  const bookedChart=await request('GET','/api/medical-record',undefined,patientCookie);assert.equal(bookedChart.body.medicalRecordNumber,'TBY-00000001');assert.ok(bookedChart.body.records.some(r=>r.category==='appointment'&&r.appointmentId===appointments[0].id));
   const doctorAccount=await request('POST',`/api/admin/doctors/${doctorId}/account`,{email:'doctor@example.test',phone:'01012345678'},adminCookie);
   assert.equal(doctorAccount.status,201);assert.ok(doctorAccount.body.account.temporaryPassword);
   const doctorLogin=await request('POST','/api/login',{email:'doctor@example.test',password:doctorAccount.body.account.temporaryPassword});
@@ -84,9 +84,9 @@ test('admin can publish verified branch and doctor, schedule real slots, and boo
   const followDate=new Date(Date.now()+21*86400000).toISOString().slice(0,10);
   const follow=await request('POST',`/api/doctor/appointments/${appointment.id}/follow-up`,{startsAt:`${followDate}T23:00`},doctorCookie);assert.equal(follow.status,201);
   const afterFollow=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(afterFollow.body.records.some(r=>r.category==='follow_up'&&r.appointmentId===follow.body.appointment.id));
-  const boundary='doctor-report-boundary',pdf=Buffer.from('%PDF-1.4\nverified report\n%%EOF'),parts=[Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nlab\r\n--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nتحليل موثق\r\n--${boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nملخص التقرير\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="lab.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),pdf,Buffer.from(`\r\n--${boundary}--\r\n`)];
+  const boundary='doctor-report-boundary',pdf=Buffer.from('%PDF-1.4\nverified report\n%%EOF'),parts=[Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nlab\r\n--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nتحليل موثق\r\n--${boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nملخص التقرير\r\n--${boundary}\r\nContent-Disposition: form-data; name="result"\r\n\r\nنتيجة افتراضية للاختبار\r\n--${boundary}\r\nContent-Disposition: form-data; name="units"\r\n\r\nmg/dL\r\n--${boundary}\r\nContent-Disposition: form-data; name="referenceRange"\r\n\r\n0-10\r\n--${boundary}\r\nContent-Disposition: form-data; name="resultStatus"\r\n\r\nfinal\r\n--${boundary}\r\nContent-Disposition: form-data; name="providerName"\r\n\r\nمعمل تجريبي\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="lab.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),pdf,Buffer.from(`\r\n--${boundary}--\r\n`)];
   const resultUpload=await rawRequest('POST',`/api/medical-admin/patients/${chart.body.patientUserId}/upload`,Buffer.concat(parts),`multipart/form-data; boundary=${boundary}`,doctorCookie);assert.equal(resultUpload.status,201);
-  const report=JSON.parse(resultUpload.raw.toString()).record,withReport=await request('GET','/api/medical-record',undefined,patientCookie);assert.ok(withReport.body.records.some(r=>r.id===report.id&&r.title==='تحليل موثق'&&r.fileName==='lab.pdf'));
+  const report=JSON.parse(resultUpload.raw.toString()).record,withReport=await request('GET','/api/medical-record',undefined,patientCookie),visibleReport=withReport.body.records.find(r=>r.id===report.id);assert.ok(visibleReport&&visibleReport.title==='تحليل موثق'&&visibleReport.fileName==='lab.pdf');assert.equal(visibleReport.report.result,'نتيجة افتراضية للاختبار');assert.equal(visibleReport.report.units,'mg/dL');
 });
 
 test('security headers are returned on API responses', async () => {
@@ -138,6 +138,7 @@ test('only the platform admin provisions branch staff; branch roles stay scoped'
   const patientUserId=db.prepare('SELECT user_id FROM patient_profiles WHERE id=?').get(patientId).user_id;
   const scopedList=await request('GET','/api/medical-admin/patients',undefined,managerCookie);assert.equal(scopedList.status,200);assert.ok(scopedList.body.patients.some(p=>p.userId===patientUserId));
   const patientFile=await request('GET',`/api/medical-admin/patients/${patientUserId}`,undefined,managerCookie);assert.equal(patientFile.status,200);assert.equal(patientFile.body.profile.name,'مريض تجريبي');
+  const profileUpdate=await request('PATCH',`/api/medical-admin/patients/${patientUserId}/profile`,{nationalId:'29901011234567',address:'عنوان اختباري ١٠، المعادي',maritalStatus:'متزوج',email:'patient.updated@example.test',phone:'01011112222'},managerCookie);assert.equal(profileUpdate.status,200);assert.equal(profileUpdate.body.profile.nationalId,'29901011234567');assert.equal((await request('GET','/api/me',undefined,patientCookie)).body.user.email,'patient.updated@example.test');
   const staffRecord=await request('POST',`/api/medical-admin/patients/${patientUserId}/records`,{category:'visit',title:'ملاحظة استقبال',detail:'معلومة أضافها موظف الفرع'},managerCookie);assert.equal(staffRecord.status,201);assert.equal(staffRecord.body.record.status,'staff_entered_pending_clinician_review');
   assert.ok((await request('GET',`/api/medical-admin/patients/${patientUserId}`,undefined,adminCookie)).body.records.some(r=>r.id===staffRecord.body.record.id));
   const provisioned=await request('POST','/api/medical-admin/patients',{name:'مريض أنشأه الفرع',email:'frontdesk.patient@example.test',phone:'01098765432',healthConsent:true},managerCookie);assert.equal(provisioned.status,201);assert.ok(provisioned.body.account.temporaryPassword);assert.equal((await request('GET',`/api/medical-admin/patients/${provisioned.body.userId}`,undefined,managerCookie)).status,200);
